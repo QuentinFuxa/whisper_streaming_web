@@ -32,7 +32,7 @@ args = parser.parse_args()
 asr, online = asr_factory(args)
 
 # Load demo HTML for the root endpoint
-with open("src/live_transcription.html", "r") as f:
+with open("src/live_transcription.html", "r", encoding="utf-8") as f:
     html = f.read()
 
 @app.get("/")
