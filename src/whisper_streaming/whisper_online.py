@@ -177,7 +177,7 @@ def backend_factory(args):
             model_dir=args.model_dir,
         )
         e = time.time()
-        logger.info(f"done. It took {round(e-t,2)} seconds.")
+        logger.info(f"Whisper model loaded. It took {round(e-t,2)} seconds.")
 
     # Apply common configurations
     if getattr(args, "vad", False):  # Checks if VAD argument is present and True
