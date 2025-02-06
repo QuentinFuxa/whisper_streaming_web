@@ -7,8 +7,8 @@
   <style>
     body {
       font-family: 'Inter', sans-serif;
-      margin: 20px;
       text-align: center;
+      margin: 20px;
     }
     #recordButton {
       width: 80px;
@@ -28,10 +28,18 @@
     #recordButton:active {
       transform: scale(0.95);
     }
-    #status {
+    #transcriptions {
       margin-top: 20px;
-      font-size: 16px;
-      color: #333;
+      font-size: 18px;
+      text-align: left;
+    }
+    .transcription {
+      display: inline;
+      color: black;
+    }
+    .buffer {
+      display: inline;
+      color: rgb(197, 197, 197);
     }
     .settings-container {
       display: flex;
@@ -65,29 +73,9 @@
     label {
       font-size: 14px;
     }
-    /* Speaker-labeled transcript area */
-    #linesTranscript {
-      margin: 20px auto;
-      max-width: 600px;
-      text-align: left;
-      font-size: 16px;
-    }
-    #linesTranscript p {
-      margin: 5px 0;
-    }
-    #linesTranscript strong {
-      color: #333;
-    }
-    /* Grey buffer styling */
-    .buffer {
-      color: rgb(180, 180, 180);
-      font-style: italic;
-      margin-left: 4px;
-    }
   </style>
 </head>
 <body>
-
   <div class="settings-container">
     <button id="recordButton">🎙️</button>
     <div class="settings">
@@ -108,11 +96,9 @@
       </div>
     </div>
   </div>
-
   <p id="status"></p>
 
-  <!-- Speaker-labeled transcript -->
-  <div id="linesTranscript"></div>
+  <div id="transcriptions"></div>
 
   <script>
     let isRecording = false;
@@ -120,95 +106,87 @@
     let recorder = null;
     let chunkDuration = 1000;
     let websocketUrl = "ws://localhost:8000/asr";
+
+    // Tracks whether the user voluntarily closed the WebSocket
     let userClosing = false;
 
     const statusText = document.getElementById("status");
     const recordButton = document.getElementById("recordButton");
     const chunkSelector = document.getElementById("chunkSelector");
     const websocketInput = document.getElementById("websocketInput");
-    const linesTranscriptDiv = document.getElementById("linesTranscript");
+    const transcriptionsDiv = document.getElementById("transcriptions");
 
+    let fullTranscription = ""; // Store confirmed transcription
+
+    // Update chunk duration based on the selector
     chunkSelector.addEventListener("change", () => {
       chunkDuration = parseInt(chunkSelector.value);
     });
 
+    // Update WebSocket URL dynamically, with some basic checks
     websocketInput.addEventListener("change", () => {
       const urlValue = websocketInput.value.trim();
+
+      // Quick check to see if it starts with ws:// or wss://
       if (!urlValue.startsWith("ws://") && !urlValue.startsWith("wss://")) {
-        statusText.textContent = "Invalid WebSocket URL (must start with ws:// or wss://)";
+        statusText.textContent =
+          "Invalid WebSocket URL. It should start with ws:// or wss://";
         return;
       }
       websocketUrl = urlValue;
       statusText.textContent = "WebSocket URL updated. Ready to connect.";
     });
 
+    /**
+     * Opens webSocket connection. 
+     * returns a Promise that resolves when the connection is open.
+     * rejects if there was an error.
+     */
     function setupWebSocket() {
       return new Promise((resolve, reject) => {
         try {
           websocket = new WebSocket(websocketUrl);
         } catch (error) {
-          statusText.textContent = "Invalid WebSocket URL. Please check and try again.";
+          statusText.textContent =
+            "Invalid WebSocket URL. Please check the URL and try again.";
           reject(error);
           return;
         }
 
         websocket.onopen = () => {
-          statusText.textContent = "Connected to server.";
+          statusText.textContent = "Connected to server";
           resolve();
         };
 
-        websocket.onclose = () => {
+        websocket.onclose = (event) => {
+          // If we manually closed it, we say so
           if (userClosing) {
             statusText.textContent = "WebSocket closed by user.";
           } else {
-            statusText.textContent =
-              "Disconnected from the WebSocket server. (Check logs if model is loading.)";
+            statusText.textContent = "Disconnected from the websocket server. If this is the first launch, the model may be downloading in the backend. Check the API logs for more information.";
           }
           userClosing = false;
         };
 
         websocket.onerror = () => {
-          statusText.textContent = "Error connecting to WebSocket.";
+          statusText.textContent = "Error connecting to WebSocket";
           reject(new Error("Error connecting to WebSocket"));
         };
 
-        // Handle messages from server
         websocket.onmessage = (event) => {
           const data = JSON.parse(event.data);
-          /*
-            The server might send:
-            {
-              "lines": [
-                {"speaker": 0, "text": "Hello."},
-                {"speaker": 1, "text": "Bonjour."},
-                ...
-              ],
-              "buffer": "..."
-            }
-          */
-          const { lines = [], buffer = "" } = data;
-          renderLinesWithBuffer(lines, buffer);
+          const { transcription, buffer } = data;
+
+          // Update confirmed transcription
+          fullTranscription += transcription;
+
+          // Update the transcription display
+          transcriptionsDiv.innerHTML = `
+            <span class="transcription">${fullTranscription}</span>
+            <span class="buffer">${buffer}</span>
+          `;
         };
       });
-    }
-
-    function renderLinesWithBuffer(lines, buffer) {
-      // Clears if no lines
-      if (!Array.isArray(lines) || lines.length === 0) {
-        linesTranscriptDiv.innerHTML = "";
-        return;
-      }
-      // Build the HTML
-      // The buffer is appended to the last line if it's non-empty
-      const linesHtml = lines.map((item, idx) => {
-        let textContent = item.text;
-        if (idx === lines.length - 1 && buffer) {
-          textContent += `<span class="buffer">${buffer}</span>`;
-        }
-        return `<p><strong>Speaker ${item.speaker}:</strong> ${textContent}</p>`;
-      }).join("");
-
-      linesTranscriptDiv.innerHTML = linesHtml;
     }
 
     async function startRecording() {
@@ -224,18 +202,22 @@
         isRecording = true;
         updateUI();
       } catch (err) {
-        statusText.textContent = "Error accessing microphone. Please allow microphone access.";
+        statusText.textContent =
+          "Error accessing microphone. Please allow microphone access.";
       }
     }
 
     function stopRecording() {
       userClosing = true;
+
+      // Stop the recorder if it exists
       if (recorder) {
         recorder.stop();
         recorder = null;
       }
       isRecording = false;
 
+      // Close the websocket if it exists
       if (websocket) {
         websocket.close();
         websocket = null;
@@ -246,12 +228,15 @@
 
     async function toggleRecording() {
       if (!isRecording) {
-        linesTranscriptDiv.innerHTML = "";
+        fullTranscription = "";
+        transcriptionsDiv.innerHTML = "";
+
         try {
           await setupWebSocket();
           await startRecording();
         } catch (err) {
-          statusText.textContent = "Could not connect to WebSocket or access mic. Aborted.";
+          statusText.textContent =
+            "Could not connect to WebSocket or access mic. Recording aborted.";
         }
       } else {
         stopRecording();
@@ -260,7 +245,9 @@
 
     function updateUI() {
       recordButton.classList.toggle("recording", isRecording);
-      statusText.textContent = isRecording ? "Recording..." : "Click to start transcription";
+      statusText.textContent = isRecording
+        ? "Recording..."
+        : "Click to start transcription";
     }
 
     recordButton.addEventListener("click", toggleRecording);
