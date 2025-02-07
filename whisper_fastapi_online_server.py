@@ -10,12 +10,17 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.whisper_streaming.whisper_online import backend_factory, online_factory, add_shared_args
-
+from pathlib import Path
 
 import logging
 import logging.config
 
 def setup_logging():
+
+    log_file= Path("logs/logfile.log")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.unlink(missing_ok=True)
+    
     logging_config = {
         'version': 1,
         'disable_existing_loggers': False,
@@ -26,14 +31,20 @@ def setup_logging():
         },
         'handlers': {
             'console': {
-                'level': 'INFO',
+                'level': 'DEBUG',
                 'class': 'logging.StreamHandler',
                 'formatter': 'standard',
+            },
+            'file': {
+                'level': 'DEBUG',
+                'class': 'logging.FileHandler',
+                'formatter': 'standard',
+                'filename': str(log_file),
             },
         },
         'root': {
             'handlers': ['console'],
-            'level': 'DEBUG',
+            'level': 'INFO',
         },
         'loggers': {
             'uvicorn': {
@@ -42,18 +53,18 @@ def setup_logging():
                 'propagate': False,
             },
             'uvicorn.error': {
-                'level': 'INFO',
+                'level': 'INFO',  
             },
             'uvicorn.access': {
                 'level': 'INFO',
             },
-            'src.whisper_streaming.online_asr': {  # Add your specific module here
-                'handlers': ['console'],
+            'src.whisper_streaming': { 
+                'handlers': ['console', 'file'],
                 'level': 'DEBUG',
                 'propagate': False,
             },
-            'src.whisper_streaming.whisper_streaming': {  # Add your specific module here
-                'handlers': ['console'],
+            'src.diarization': {  
+                'handlers': ['console', 'file'],
                 'level': 'DEBUG',
                 'propagate': False,
             },
@@ -62,8 +73,13 @@ def setup_logging():
 
     logging.config.dictConfig(logging_config)
 
-setup_logging()
-logger = logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)
+    logger.info("I will log to {log_file} and to the console")
+    return logger
+    
+
+logger= setup_logging()
+
 
 
 
@@ -211,6 +227,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         "speaker": "0"
                         })
                     
+
+                    logger.debug(f"Receved new transcription: {trans}")
+
                     full_transcription += trans
                     if args.vac:
                         transcript = online.online.concatenate_tokens(online.online.transcript_buffer.buffer)
