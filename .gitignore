@@ -130,3 +130,5 @@ dmypy.json
 
 *.wav
 run_*.sh
+pixi*
+.pixi
