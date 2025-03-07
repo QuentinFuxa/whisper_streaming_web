@@ -6,7 +6,7 @@ import math
 import torch
 from typing import List
 import numpy as np
-from timed_objects import ASRToken
+from timed_objects import ASRToken, TimedList
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +66,11 @@ class WhisperTimestampedASR(ASRBase):
         )
         return result
 
-    def ts_words(self, r) -> List[ASRToken]:
+    def ts_words(self, r) -> TimedList:
         """
         Converts the whisper_timestamped result to a list of ASRToken objects.
         """
-        tokens = []
+        tokens = TimedList([],sep=self.sep)
         for segment in r["segments"]:
             for word in segment["words"]:
                 token = ASRToken(word["start"], word["end"], word["text"])
@@ -125,15 +125,15 @@ class FasterWhisperASR(ASRBase):
         )
         return list(segments)
 
-    def ts_words(self, segments) -> List[ASRToken]:
-        tokens = []
+    def ts_words(self, segments) -> TimedList:
+        tokens = TimedList([],sep=self.sep)
         for segment in segments:
             if segment.no_speech_prob > 0.9:
                 continue
             for word in segment.words:
                 token = ASRToken(word.start, word.end, word.word, probability=word.probability)
                 tokens.append(token)
-        return tokens
+        return TimedList(tokens)
 
     def segments_end_ts(self, segments) -> List[float]:
         return [segment.end for segment in segments]
@@ -204,8 +204,8 @@ class MLXWhisper(ASRBase):
         )
         return segments.get("segments", [])
 
-    def ts_words(self, segments) -> List[ASRToken]:
-        tokens = []
+    def ts_words(self, segments) -> TimedList:
+        tokens = TimedList([],sep=self.sep)
         for segment in segments:
             if segment.get("no_speech_prob", 0) > 0.9:
                 continue
@@ -241,7 +241,7 @@ class OpenaiApiASR(ASRBase):
         self.client = OpenAI()
         self.transcribed_seconds = 0
 
-    def ts_words(self, segments) -> List[ASRToken]:
+    def ts_words(self, segments) -> TimedList:
         """
         Converts OpenAI API response words into ASRToken objects while
         optionally skipping words that fall into no-speech segments.
@@ -251,7 +251,7 @@ class OpenaiApiASR(ASRBase):
             for segment in segments.segments:
                 if segment["no_speech_prob"] > 0.8:
                     no_speech_segments.append((segment.get("start"), segment.get("end")))
-        tokens = []
+        tokens = TimedList([],sep=self.sep)
         for word in segments.words:
             start = word.start
             end = word.end
