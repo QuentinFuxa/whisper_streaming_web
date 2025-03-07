@@ -215,7 +215,7 @@ class OnlineASRProcessor:
     def chunk_completed_sentence(self):
         """
         If the committed tokens form at least two sentences, chunk the audio
-        buffer at the end time of the penultimate sentence.
+        buffer at the end time of the ultimate sentence.
         """
         if not self.committed:
             return
@@ -225,10 +225,8 @@ class OnlineASRProcessor:
             logger.debug(f"\tSentence: {sentence.text}")
         if len(sentences) < 2:
             return
-        # Keep the last two sentences.
-        while len(sentences) > 2:
-            sentences.pop(0)
-        chunk_time = sentences[-2].end
+        # Keep the last sentences.
+        chunk_time = sentences[-1].end
         logger.debug(f"--- Sentence chunked at {chunk_time:.2f}")
         self.chunk_at(chunk_time)
 
@@ -313,6 +311,7 @@ class OnlineASRProcessor:
                 )
                 sentences.append(sentence)
         return sentences
+
     def finish(self) -> Transcript:
         """
         Flush the remaining transcript when processing ends.
