@@ -22,10 +22,21 @@ def format_time(seconds):
     return str(timedelta(seconds=int(seconds)))
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging for all modules
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Set root logger level
 logging.getLogger().setLevel(logging.WARNING)
+
+
+
+
+# Configure main module logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+
 
 ##### LOAD ARGS #####
 
@@ -69,6 +80,13 @@ parser.add_argument(
 
 add_shared_args(parser)
 args = parser.parse_args()
+
+
+# Configure specific loggers for different modules
+logging.getLogger("whisper_streaming_custom").setLevel(logging.getLevelName(args.log_level))
+logging.getLogger("diarization").setLevel(logging.getLevelName(args.log_level))
+
+
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -216,7 +234,7 @@ async def transcription_processor(shared_state, pcm_queue, online):
             new_tokens = online.process_iter()
             
             if new_tokens:
-                full_transcription += sep.join([t.text for t in new_tokens])
+                full_transcription += new_tokens.get_text(sep=sep)
                 
             _buffer = online.get_buffer()
             buffer = _buffer.text

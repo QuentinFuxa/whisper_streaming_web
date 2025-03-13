@@ -2,7 +2,7 @@ import sys
 import numpy as np
 import logging
 from typing import List, Tuple, Optional
-from timed_objects import ASRToken, Sentence, Transcript
+from timed_objects import ASRToken, Sentence, Transcript, TimedList
 
 logger = logging.getLogger(__name__)
 
@@ -18,23 +18,24 @@ class HypothesisBuffer:
     """
     def __init__(self, logfile=sys.stderr, confidence_validation=False):
         self.confidence_validation = confidence_validation
-        self.committed_in_buffer: List[ASRToken] = []
-        self.buffer: List[ASRToken] = []
-        self.new: List[ASRToken] = []
+        self.committed_in_buffer: TimedList = TimedList([]) 
+        self.buffer: TimedList = TimedList([])
+        self.new: TimedList = TimedList([])
         self.last_committed_time = 0.0
         self.last_committed_word: Optional[str] = None
         self.logfile = logfile
 
-    def insert(self, new_tokens: List[ASRToken], offset: float):
+    def insert(self, new_tokens: TimedList, offset: float):
         """
         Insert new tokens (after applying a time offset) and compare them with the 
         already committed tokens. Only tokens that extend the committed hypothesis 
         are added.
         """
         # Apply the offset to each token.
-        new_tokens = [token.with_offset(offset) for token in new_tokens]
+        new_tokens.shift(offset)
+        sep= new_tokens.sep
         # Only keep tokens that are roughly “new”
-        self.new = [token for token in new_tokens if token.start > self.last_committed_time - 0.1]
+        self.new = TimedList([token for token in new_tokens if token.start > self.last_committed_time - 0.1],sep= sep)
 
         if self.new:
             first_token = self.new[0]
@@ -45,22 +46,20 @@ class HypothesisBuffer:
                     # Try to match 1 to 5 consecutive tokens
                     max_ngram = min(min(committed_len, new_len), 5)
                     for i in range(1, max_ngram + 1):
-                        committed_ngram = " ".join(token.text for token in self.committed_in_buffer[-i:])
-                        new_ngram = " ".join(token.text for token in self.new[:i])
+                        committed_ngram = self.committed_in_buffer[-i:].get_text(sep=sep)
+                        new_ngram = self.new[:i].get_text(sep=sep)
                         if committed_ngram == new_ngram:
-                            removed = []
-                            for _ in range(i):
-                                removed_token = self.new.pop(0)
-                                removed.append(repr(removed_token))
-                            logger.debug(f"Removing last {i} words: {' '.join(removed)}")
+                            removed = self.new[:i].get_text(sep=sep)
+                            self.new = self.new[i:]
+                            logger.debug(f"Removing last {i} words: {removed}")
                             break
 
-    def flush(self) -> List[ASRToken]:
+    def flush(self) -> TimedList:
         """
         Returns the committed chunk, defined as the longest common prefix
         between the previous hypothesis and the new tokens.
         """
-        committed: List[ASRToken] = []
+        committed: TimedList = TimedList([])
         while self.new:
             current_new = self.new[0]
             if self.confidence_validation and current_new.probability and current_new.probability > 0.95:
@@ -80,7 +79,7 @@ class HypothesisBuffer:
             else:
                 break
         self.buffer = self.new
-        self.new = []
+        self.new = TimedList([])
         self.committed_in_buffer.extend(committed)
         return committed
 
@@ -88,8 +87,7 @@ class HypothesisBuffer:
         """
         Remove tokens (from the beginning) that have ended before `time`.
         """
-        while self.committed_in_buffer and self.committed_in_buffer[0].end <= time:
-            self.committed_in_buffer.pop(0)
+        _,self.committed_in_buffer= self.committed_in_buffer.split_at(time, edge_word_goes_left=False)
 
 
 
@@ -142,7 +140,7 @@ class OnlineASRProcessor:
         self.transcript_buffer = HypothesisBuffer(logfile=self.logfile, confidence_validation=self.confidence_validation)
         self.buffer_time_offset = offset if offset is not None else 0.0
         self.transcript_buffer.last_committed_time = self.buffer_time_offset
-        self.committed: List[ASRToken] = []
+        self.committed: TimedList = TimedList([],sep=self.asr.sep)
 
     def insert_audio_chunk(self, audio: np.ndarray):
         """Append an audio chunk (a numpy array) to the current audio buffer."""
@@ -172,14 +170,14 @@ class OnlineASRProcessor:
         context_text = self.asr.sep.join(token.text for token in non_prompt_tokens)
         return self.asr.sep.join(prompt_list[::-1]), context_text
 
-    def get_buffer(self):
+    def get_buffer(self) -> Transcript:
         """
-        Get the unvalidated buffer in string format.
+        Get the unvalidated buffer in TimedText format.
         """
-        return self.concatenate_tokens(self.transcript_buffer.buffer)
+        return self.transcript_buffer.buffer.concatenate(sep=self.asr.sep)
         
 
-    def process_iter(self) -> Transcript:
+    def process_iter(self) -> TimedList:
         """
         Processes the current audio buffer.
 
@@ -190,14 +188,12 @@ class OnlineASRProcessor:
             f"Transcribing {len(self.audio_buffer)/self.SAMPLING_RATE:.2f} seconds from {self.buffer_time_offset:.2f}"
         )
         res = self.asr.transcribe(self.audio_buffer, init_prompt=prompt_text)
-        tokens = self.asr.ts_words(res)  # Expecting List[ASRToken]
+        tokens = self.asr.ts_words(res)  # Expecting TimedList  
         self.transcript_buffer.insert(tokens, self.buffer_time_offset)
         committed_tokens = self.transcript_buffer.flush()
         self.committed.extend(committed_tokens)
-        completed = self.concatenate_tokens(committed_tokens)
-        logger.debug(f">>>> COMPLETE NOW: {completed.text}")
-        incomp = self.concatenate_tokens(self.transcript_buffer.buffer)
-        logger.debug(f"INCOMPLETE: {incomp.text}")
+        logger.debug(f">>>> COMPLETE NOW: {committed_tokens.get_text()}")
+        logger.debug(f"INCOMPLETE: {self.transcript_buffer.buffer.get_text()}")
 
         if committed_tokens and self.buffer_trimming_way == "sentence":
             if len(self.audio_buffer) / self.SAMPLING_RATE > self.buffer_trimming_sec:
@@ -217,18 +213,20 @@ class OnlineASRProcessor:
         If the committed tokens form at least two sentences, chunk the audio
         buffer at the end time of the penultimate sentence.
         """
+
         if not self.committed:
             return
-        logger.debug("COMPLETED SENTENCE: " + " ".join(token.text for token in self.committed))
-        sentences = self.words_to_sentences(self.committed)
+        logger.debug("COMPLETED SENTENCE: " + self.committed.get_text())
+
+        sentences = self.committed.split_to_sentences(self.tokenize)
         for sentence in sentences:
-            logger.debug(f"\tSentence: {sentence.text}")
+            logger.debug(f"\tSentence: {sentence}")
         if len(sentences) < 2:
             return
         # Keep the last two sentences.
         while len(sentences) > 2:
             sentences.pop(0)
-        chunk_time = sentences[-2].end
+        chunk_time = sentences[-2][-1].end
         logger.debug(f"--- Sentence chunked at {chunk_time:.2f}")
         self.chunk_at(chunk_time)
 
@@ -269,76 +267,17 @@ class OnlineASRProcessor:
             f"Audio buffer length after chunking: {len(self.audio_buffer)/self.SAMPLING_RATE:.2f}s"
         )
 
-    def words_to_sentences(self, tokens: List[ASRToken]) -> List[Sentence]:
-        """
-        Converts a list of tokens to a list of Sentence objects using the provided
-        sentence tokenizer.
-        """
-        if not tokens:
-            return []
 
-        full_text = " ".join(token.text for token in tokens)
 
-        if self.tokenize:
-            try:
-                sentence_texts = self.tokenize(full_text)
-            except Exception as e:
-                # Some tokenizers (e.g., MosesSentenceSplitter) expect a list input.
-                try:
-                    sentence_texts = self.tokenize([full_text])
-                except Exception as e2:
-                    raise ValueError("Tokenization failed") from e2
-        else:
-            sentence_texts = [full_text]
-
-        sentences: List[Sentence] = []
-        token_index = 0
-        for sent_text in sentence_texts:
-            sent_text = sent_text.strip()
-            if not sent_text:
-                continue
-            sent_tokens = []
-            accumulated = ""
-            # Accumulate tokens until roughly matching the length of the sentence text.
-            while token_index < len(tokens) and len(accumulated) < len(sent_text):
-                token = tokens[token_index]
-                accumulated = (accumulated + " " + token.text).strip() if accumulated else token.text
-                sent_tokens.append(token)
-                token_index += 1
-            if sent_tokens:
-                sentence = Sentence(
-                    start=sent_tokens[0].start,
-                    end=sent_tokens[-1].end,
-                    text=" ".join(t.text for t in sent_tokens),
-                )
-                sentences.append(sentence)
-        return sentences
-    def finish(self) -> Transcript:
+    def finish(self) -> TimedList:
         """
         Flush the remaining transcript when processing ends.
         """
         remaining_tokens = self.transcript_buffer.buffer
-        final_transcript = self.concatenate_tokens(remaining_tokens)
-        logger.debug(f"Final non-committed transcript: {final_transcript}")
+        logger.debug(f"Final non-committed transcript: {remaining_tokens}")
         self.buffer_time_offset += len(self.audio_buffer) / self.SAMPLING_RATE
-        return final_transcript
+        return remaining_tokens
 
-    def concatenate_tokens(
-        self,
-        tokens: List[ASRToken],
-        sep: Optional[str] = None,
-        offset: float = 0
-    ) -> Transcript:
-        sep = sep if sep is not None else self.asr.sep
-        text = sep.join(token.text for token in tokens)
-        probability = sum(token.probability for token in tokens if token.probability) / len(tokens) if tokens else None
-        if tokens:
-            start = offset + tokens[0].start
-            end = offset + tokens[-1].end
-        else:
-            start = None
-            end = None
-        return Transcript(start, end, text, probability=probability)
 
 
 class VACOnlineASRProcessor:
@@ -425,7 +364,7 @@ class VACOnlineASRProcessor:
                 self.buffer_offset += max(0, len(self.audio_buffer) - self.SAMPLING_RATE)
                 self.audio_buffer = self.audio_buffer[-self.SAMPLING_RATE:]
 
-    def process_iter(self) -> Transcript:
+    def process_iter(self) -> TimedList:
         """
         Depending on the VAD status and the amount of accumulated audio,
         process the current audio chunk.
@@ -437,17 +376,17 @@ class VACOnlineASRProcessor:
             return self.online.process_iter()
         else:
             logger.debug("No online update, only VAD")
-            return Transcript(None, None, "")
+            return TimedList([],sep=self.online.asr.sep)
 
-    def finish(self) -> Transcript:
+    def finish(self) -> TimedList:
         """Finish processing by flushing any remaining text."""
         result = self.online.finish()
         self.current_online_chunk_buffer_size = 0
         self.is_currently_final = False
         return result
     
-    def get_buffer(self):
+    def get_buffer(self) -> Transcript:
         """
-        Get the unvalidated buffer in string format.
+        Get the unvalidated buffer in TimedText format.
         """
-        return self.online.concatenate_tokens(self.online.transcript_buffer.buffer).text
+        return self.online.transcript_buffer.buffer.concatenate(sep=self.online.asr.sep)
