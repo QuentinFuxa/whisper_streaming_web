@@ -22,10 +22,21 @@ def format_time(seconds):
     return str(timedelta(seconds=int(seconds)))
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging for all modules
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Set root logger level
 logging.getLogger().setLevel(logging.WARNING)
+
+
+
+
+# Configure main module logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+
 
 ##### LOAD ARGS #####
 
@@ -74,6 +85,15 @@ parser.add_argument(
 
 add_shared_args(parser)
 args = parser.parse_args()
+
+
+# Configure specific loggers for different modules
+logging.getLogger("whisper_streaming_custom").setLevel(logging.getLevelName(args.log_level))
+logging.getLogger("diarization").setLevel(logging.getLevelName(args.log_level))
+
+## Is not this used?
+# MIN_CHUNK_SIZE = int(args.vac_chunk_size if args.vac else args.min_chunk_size)
+
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -208,24 +228,38 @@ async def start_ffmpeg_decoder():
     )
     return process
 
-async def transcription_processor(shared_state, pcm_queue, online):
+async def transcription_processor(shared_state, pcm_queue, transcriber):
+
+    
     full_transcription = ""
-    sep = online.asr.sep
+    
+    # TODO: simplify and use sep from TimedList
+    try:
+        sep = transcriber.asr.sep
+    except AttributeError:
+        try:
+            sep = transcriber.online.asr.sep
+        except AttributeError:
+            logger.warning("No separator found for transcription. Using default separator.' '")
+            sep = " "
+
+
+    logger.info("Transcription processor started.")
     
     while True:
         try:
             pcm_array = await pcm_queue.get()
             
-            logger.info(f"{len(online.audio_buffer) / online.SAMPLING_RATE} seconds of audio will be processed by the model.")
+            logger.info(f"{len(transcriber.audio_buffer) / transcriber.SAMPLING_RATE:5.3f} seconds are in the audio buffer.")
             
             # Process transcription
-            online.insert_audio_chunk(pcm_array)
-            new_tokens = online.process_iter()
+            transcriber.insert_audio_chunk(pcm_array)
+            new_tokens = transcriber.process_iter()
             
             if new_tokens:
-                full_transcription += sep.join([t.text for t in new_tokens])
+                full_transcription += new_tokens.get_text(sep=sep)
                 
-            _buffer = online.get_buffer()
+            _buffer = transcriber.get_buffer()
             buffer = _buffer.text
             end_buffer = _buffer.end if _buffer.end else (new_tokens[-1].end if new_tokens else 0)
             
@@ -384,10 +418,10 @@ async def websocket_endpoint(websocket: WebSocket):
     transcription_queue = asyncio.Queue() if args.transcription else None
     diarization_queue = asyncio.Queue() if args.diarization else None
     
-    online = None
+    transcriber = None
 
     async def restart_ffmpeg():
-        nonlocal ffmpeg_process, online, pcm_buffer
+        nonlocal ffmpeg_process, transcriber, pcm_buffer
         if ffmpeg_process:
             try:
                 ffmpeg_process.kill()
@@ -398,7 +432,7 @@ async def websocket_endpoint(websocket: WebSocket):
         pcm_buffer = bytearray()
         
         if args.transcription:
-            online = online_factory(args, asr, tokenizer)
+            transcriber = online_factory(args, asr, tokenizer)
         
         await shared_state.reset()
         logger.info("FFmpeg process started.")
@@ -406,9 +440,11 @@ async def websocket_endpoint(websocket: WebSocket):
     await restart_ffmpeg()
 
     tasks = []    
-    if args.transcription and online:
+    if args.transcription and transcriber:
         tasks.append(asyncio.create_task(
-            transcription_processor(shared_state, transcription_queue, online)))    
+            transcription_processor(shared_state, transcription_queue, transcriber)))    
+    else:
+        logger.critical("Transcription processor not started.")
     if args.diarization and diarization:
         tasks.append(asyncio.create_task(
             diarization_processor(shared_state, diarization_queue, diarization)))
